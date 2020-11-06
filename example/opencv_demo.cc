@@ -28,6 +28,8 @@ either expressed or implied, of the Regents of The University of Michigan.
 #include <iostream>
 
 #include "opencv2/opencv.hpp"
+#include "opencv2/video.hpp"
+
 
 extern "C" {
 #include "apriltag.h"
@@ -58,18 +60,35 @@ int main(int argc, char *argv[])
     getopt_add_double(getopt, 'x', "decimate", "2.0", "Decimate input image by this factor");
     getopt_add_double(getopt, 'b', "blur", "0.0", "Apply low-pass blur to input");
     getopt_add_bool(getopt, '0', "refine-edges", 1, "Spend more time trying to align edges of tags");
+    getopt_add_double(getopt, 'i', "input-scale", "1.0", "Resize input based on this scale. Values smaller than 1.0 increase performance.");
+    getopt_add_int(getopt, 'l', "line-thickness", "1", "Draw line thickness");
+    getopt_add_double(getopt, 'n', "font-scale", "2.0", "Text font scale");
+    getopt_add_string(getopt, 'o', "output-file", "output.mp4", "Video output file of the detection.");
 
     if (!getopt_parse(getopt, argc, argv, 1) ||
             getopt_get_bool(getopt, "help")) {
-        printf("Usage: %s [options]\n", argv[0]);
+        printf("Usage: %s [options] [<video_file>]\n", argv[0]);
         getopt_do_usage(getopt);
         exit(0);
     }
 
+    const zarray_t *inputs = getopt_get_extra_args(getopt);
+
     // Initialize camera
-    VideoCapture cap(0);
+    VideoCapture cap;
+    if (zarray_size(inputs) == 0) {
+        cap = VideoCapture(0);
+    } else if (zarray_size(inputs) == 1) {
+        char *path;
+        zarray_get(inputs, 0, &path);
+        printf("loading %s\n", path);
+        cap = VideoCapture(path);
+    } else {
+        cerr << "Only supports one video file at a time" << endl;
+        return -1;
+    }
     if (!cap.isOpened()) {
-        cerr << "Couldn't open video capture device" << endl;
+        cerr << "Couldn't open video capture device or file" << endl;
         return -1;
     }
 
@@ -105,10 +124,27 @@ int main(int argc, char *argv[])
     td->nthreads = getopt_get_int(getopt, "threads");
     td->debug = getopt_get_bool(getopt, "debug");
     td->refine_edges = getopt_get_bool(getopt, "refine-edges");
+    double input_scale = getopt_get_double(getopt, "input-scale");
+    double font_scale = getopt_get_double(getopt, "font-scale");
+    int line_thickness = getopt_get_double(getopt, "line-thickness");
+    const char *output_file = getopt_get_string(getopt, "output-file");
 
-    Mat frame, gray;
+    double src_fps = 25.0;
+    try {
+        src_fps = cap.get(cv::CAP_PROP_FPS);
+    }
+    catch (...) {
+        cerr << " Can't get FPS of source videofile. For output video FPS = 25 by default. \n";
+    }
+    
+    Mat frame, gray, frame_resized;
+    Size scaled_size = Size((int) cap.get(CAP_PROP_FRAME_WIDTH) * input_scale,    // Acquire input size
+                  (int) cap.get(CAP_PROP_FRAME_HEIGHT) * input_scale);
+    VideoWriter out = VideoWriter(output_file, VideoWriter::fourcc('H','2','6','4'), src_fps, scaled_size);
     while (true) {
-        cap >> frame;
+        if (!cap.read(frame))
+            break;
+        resize(frame, frame, scaled_size);
         cvtColor(frame, gray, COLOR_BGR2GRAY);
 
         // Make an image_u8_t header for the Mat data
@@ -126,35 +162,39 @@ int main(int argc, char *argv[])
             zarray_get(detections, i, &det);
             line(frame, Point(det->p[0][0], det->p[0][1]),
                      Point(det->p[1][0], det->p[1][1]),
-                     Scalar(0, 0xff, 0), 2);
+                     Scalar(0, 0xff, 0), line_thickness);
             line(frame, Point(det->p[0][0], det->p[0][1]),
                      Point(det->p[3][0], det->p[3][1]),
-                     Scalar(0, 0, 0xff), 2);
+                     Scalar(0, 0, 0xff), line_thickness);
             line(frame, Point(det->p[1][0], det->p[1][1]),
                      Point(det->p[2][0], det->p[2][1]),
-                     Scalar(0xff, 0, 0), 2);
+                     Scalar(0xff, 0, 0), line_thickness);
             line(frame, Point(det->p[2][0], det->p[2][1]),
                      Point(det->p[3][0], det->p[3][1]),
-                     Scalar(0xff, 0, 0), 2);
+                     Scalar(0xff, 0, 0), line_thickness);
 
             stringstream ss;
             ss << det->id;
             String text = ss.str();
             int fontface = FONT_HERSHEY_SCRIPT_SIMPLEX;
-            double fontscale = 1.0;
             int baseline;
-            Size textsize = getTextSize(text, fontface, fontscale, 2,
+            Size textsize = getTextSize(text, fontface, font_scale, 1,
                                             &baseline);
             putText(frame, text, Point(det->c[0]-textsize.width/2,
                                        det->c[1]+textsize.height/2),
-                    fontface, fontscale, Scalar(0xff, 0x99, 0), 2);
+                    fontface, font_scale, Scalar(0xff, 0x99, 0), 2);
         }
         apriltag_detections_destroy(detections);
 
+        namedWindow("Tag Detections", WINDOW_KEEPRATIO);
+        out.write(frame);
         imshow("Tag Detections", frame);
-        if (waitKey(30) >= 0)
+        if (waitKey(1) >= 0)
             break;
     }
+
+    out.release();
+    cap.release();
 
     apriltag_detector_destroy(td);
 
